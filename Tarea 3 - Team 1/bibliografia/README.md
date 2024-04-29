@@ -1,3 +1,3 @@
 ![logo](/assets/ispc.png)
 
-![Actividad Numero 3]
+Informacion de componentes utilizados
