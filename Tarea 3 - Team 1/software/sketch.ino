@@ -1,38 +1,126 @@
-#include <DHT.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include "DHT.h"
 
-#define DHTPIN 15     // Pin D15 (GPIO 15) para el sensor DHT22
-#define DHTTYPE DHT22 // Tipo de sensor DHT
+// Configuración de la red WiFi
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
 
-const int ledPin = 5;        // Pin D5 (GPIO 5) para el dimmer
-const int potPin = 35;       // Pin A35 para el potenciómetro
-const int buttonPin = 25;    // Pin D25 (GPIO 25) para el botón
-const int buttonLedPin = 2;  // Pin D2 (GPIO 2) para el LED del botón
+// Configuración del servidor MQTT
+const char* mqtt_server = "138.59.247.221";
+const int mqtt_port = 1883;
+const char* mqtt_user = "";
+const char* mqtt_password = "";
+const char* mqtt_topic_temp = "temperatura";
+const char* mqtt_topic_hum = "humedad";
+const char* mqtt_topic_led1 = "led1";
+const char* mqtt_topic_led2 = "led2";
 
-int previousValue = 0;
-float smoothedValue = 0;
-bool buttonState = false;
+// Configuración del pin del sensor DHT22
+#define DHT_PIN 14
+#define DHT_TYPE DHT22
+DHT dht(DHT_PIN, DHT_TYPE);
 
-DHT dht(DHTPIN, DHTTYPE);
+const int buttonPin = 25;    // Botón conectado al pin 25
+const int ledPin1 = 22;      // LED conectado al pin 22
+const int ledPin2 = 23;      // LED conectado al pin 23
+const int potPin = 35;       // Potenciómetro conectado al pin 35
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+float smoothedValue = 0;  // Valor suavizado del potenciómetro
+int previousValue = 0;    // Valor previo del potenciómetro
+bool led1State = false;   // Estado actual del LED1
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Conectando a ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("Conectado a la red WiFi");
+  Serial.println("Dirección IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Intentando conexión MQTT...");
+    if (client.connect("ESP32Client", mqtt_user, mqtt_password)) {
+      Serial.println("conectado");
+    } else {
+      Serial.print("falló, estado ");
+      Serial.print(client.state());
+      Serial.println(" intentando de nuevo en 5 segundos");
+      delay(5000);
+    }
+  }
+}
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(ledPin, OUTPUT);
-  pinMode(buttonPin, INPUT_PULLUP); // Habilita resistencia pull-up interna para el botón
-  pinMode(buttonLedPin, OUTPUT);
-
-  dht.begin(); // Inicializar el sensor DHT
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(buttonPin, INPUT_PULLUP); // Configura el pin del botón como entrada con pull-up
+  pinMode(ledPin1, OUTPUT);
+  pinMode(ledPin2, OUTPUT);
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
 }
 
 void loop() {
-  // Leer temperatura y humedad del sensor DHT22
-  float temperature = dht.readTemperature(); // Leer temperatura en grados Celsius
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
 
-  // Mostrar la información de temperatura por consola
+  float temperatura = dht.readTemperature();
+  float humedad = dht.readHumidity();
+
+  if (isnan(temperatura) || isnan(humedad)) {
+    Serial.println("Error al leer la temperatura o humedad desde el sensor DHT22");
+    return;
+  }
+
   Serial.print("Temperatura: ");
-  Serial.print(temperature);
-  Serial.println(" °C");
+  Serial.print(temperatura);
+  Serial.print(" °C\t");
+  Serial.print("Humedad: ");
+  Serial.print(humedad);
+  Serial.print(" %\t");
+  Serial.print("LED1: ");
+  Serial.print(led1State ? "ON" : "OFF");
+  Serial.print("\t");
+  Serial.print("LED2 Brightness: ");
+  Serial.println(smoothedValue);
 
-  // Control del LED con el potenciómetro
+  // Envío de temperatura y humedad como mensajes independientes
+  char tempBuffer[10];
+  dtostrf(temperatura, 4, 2, tempBuffer);
+  client.publish(mqtt_topic_temp, tempBuffer);
+
+  char humBuffer[10];
+  dtostrf(humedad, 4, 2, humBuffer);
+  client.publish(mqtt_topic_hum, humBuffer);
+
+  // Lectura del estado del botón y control del LED1
+  int buttonState = digitalRead(buttonPin);
+  if (buttonState == LOW) {
+    led1State = !led1State; // Cambia el estado del LED1
+    digitalWrite(ledPin1, led1State ? HIGH : LOW); // Enciende o apaga el LED1 según el estado actual
+    client.publish(mqtt_topic_led1, led1State ? "ON" : "OFF");
+    delay(200); // Retardo para evitar rebotes
+  }
+
+  // Lectura del valor del potenciómetro y control suavizado de la luminosidad del LED2
   int potValue = analogRead(potPin);
   int mappedValue = map(potValue, 0, 4095, 0, 255);
   
@@ -45,20 +133,10 @@ void loop() {
   previousValue = mappedValue;
   
   int brightness = int(smoothedValue);
-  analogWrite(ledPin, brightness);
+  analogWrite(ledPin2, brightness); // Controla la luminosidad del LED2
+  char brightnessBuffer[4];
+  itoa(brightness, brightnessBuffer, 10);
+  client.publish(mqtt_topic_led2, brightnessBuffer);
 
-  // Leer estado del botón
-  bool buttonPressed = digitalRead(buttonPin) == LOW;
-
-  // Comprobar si el estado del botón ha cambiado
-  if (buttonPressed && !buttonState) {
-    buttonState = true; // Cambiar el estado del botón
-
-    // Alternar estado del LED del botón
-    digitalWrite(buttonLedPin, !digitalRead(buttonLedPin));
-  } else if (!buttonPressed && buttonState) {
-    buttonState = false; // Restablecer el estado del botón
-  }
-
-  delay(100); // Ajusta el retardo según sea necesario
+  delay(100); // Pequeño retardo para estabilidad
 }
